@@ -32,18 +32,24 @@ class PPO(TensorDictModuleBase):
             make_mlp([128, 64])
         ).to(self.device)
 
+        fuse_mlp = make_mlp([256, 256]).to(self.device)
+
         # Feature extractor
         self.feature_extractor = TensorDictSequential(
             TensorDictModule(feature_extractor_network, [("agents", "observation", "lidar")], ["_cnn_feature"]),
             TensorDictModule(dynamic_obstacle_network, [("agents", "observation", "dynamic_obstacle")], ["_dynamic_obstacle_feature"]),
-            CatTensors(["_cnn_feature", ("agents", "observation", "state"), "_dynamic_obstacle_feature"], "_feature", del_keys=False), 
-            TensorDictModule(make_mlp([256, 256]), ["_feature"], ["_feature"]),
+            CatTensors(["_cnn_feature", ("agents", "observation", "state"), "_dynamic_obstacle_feature"], "_feature", del_keys=False),
+            TensorDictModule(fuse_mlp, ["_feature"], ["_feature"]),
         ).to(self.device)
+        # Plain tuples are not registered by nn.Module, so state_dict keys (and old checkpoints) are unchanged.
+        self._fe_parts = (feature_extractor_network, dynamic_obstacle_network, fuse_mlp)
 
         # Actor etwork
         self.n_agents, self.action_dim = action_spec.shape
+        beta_actor = BetaActor(self.action_dim)
+        self._beta_actor = (beta_actor,)
         self.actor = ProbabilisticActor(
-            TensorDictModule(BetaActor(self.action_dim), ["_feature"], ["alpha", "beta"]),
+            TensorDictModule(beta_actor, ["_feature"], ["alpha", "beta"]),
             in_keys=["alpha", "beta"],
             out_keys=[("agents", "action_normalized")], 
             distribution_class=IndependentBeta,
@@ -90,6 +96,30 @@ class PPO(TensorDictModuleBase):
         actions_world = vec_to_world(actions, tensordict["agents", "observation", "direction"])
         tensordict["agents", "action"] = actions_world
         return tensordict
+
+    def imagination_interface(self, lidar_shape):
+        """Differentiable policy pieces for BPTT through the world model (see world_model.py).
+
+        The world-model state is [drone state (8) | closest-N dynamic obstacles (N*10)]. The lidar scan is not
+        predicted: it is encoded once at the start of each imagined rollout and held fixed as context, so
+        imagination is only trustworthy for the dynamic-obstacle part over a short horizon.
+        """
+        cnn, dyn_net, fuse = self._fe_parts
+        beta_actor = self._beta_actor[0]
+        n_dyn = self.cfg.feature_extractor.dyn_obs_num
+        limit = self.cfg.actor.action_limit
+
+        def encode(ctx):
+            return cnn(ctx["lidar"].reshape(-1, 1, *lidar_shape))
+
+        def act(s, enc):
+            dyn = s[..., 8:].reshape(-1, 1, n_dyn, 10)
+            feat = fuse(torch.cat([enc, s[..., :8], dyn_net(dyn)], dim=-1))  # same order as CatTensors above
+            alpha, beta = beta_actor(feat)
+            a_norm = torch.distributions.Beta(alpha, beta).rsample()          # reparameterised sample
+            return 2. * a_norm * limit - limit                                # local goal-frame velocity command
+
+        return type("ImaginationInterface", (), {"encode": staticmethod(encode), "act": staticmethod(act)})
 
     def train(self, tensordict):
         # tensordict: (num_env, num_frames, dim), batchsize = num_env * num_frames

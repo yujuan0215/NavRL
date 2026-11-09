@@ -2,6 +2,7 @@ defaults:
   - _self_
   - drone
   - ppo
+  - wm
   - sim
 
 headless: False

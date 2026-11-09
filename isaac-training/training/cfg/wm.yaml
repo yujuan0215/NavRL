@@ -1,0 +1,23 @@
+wm:
+  enable: False            # False = original NavRL PPO training, unchanged
+  use_ppo: True            # False = pure BPTT through the world model (SuperMimic-style ablation)
+  policy_start_iter: 200   # fit the world model alone first, then start BPTT policy updates
+
+  # --- from the SuperMimic paper ---
+  k: 8                     # world-model fit window (autoregressive steps)
+  horizon: 32              # imagination horizon H (32 * 0.016 s ~ 0.5 s, matches the proposal's 0.5-1.0 s)
+  # --- NavRL's own PPO values, reused ---
+  gamma: 0.99
+  lmbda: 0.95
+  # --- my defaults, tune these ---
+  hidden: 256
+  layers: 3
+  buffer_size: 200000      # steps
+  min_buffer: 5000         # steps before the first fit
+  model_iters: 20          # model updates per collector batch
+  model_batch: 1024
+  model_lr: 3e-4
+  policy_iters: 4          # BPTT updates per collector batch
+  policy_batch: 512
+  policy_lr: 1e-4          # lower than PPO's 5e-4: analytic gradients through a learned model are sharp
+  critic_lr: 3e-4

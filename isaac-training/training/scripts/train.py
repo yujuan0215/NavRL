@@ -63,6 +63,18 @@ def main(cfg):
     # checkpoint = "/home/xinmingh/RLDrones/navigation/scripts/nav-ros/navigation_runner/ckpts/checkpoint_36000.pt"
     # policy.load_state_dict(torch.load(checkpoint))
     
+    # Optional SuperMimic-style world model (cfg.wm.enable=True); default keeps original PPO training
+    wm = None
+    if cfg.wm.enable:
+        from world_model import WMTrainer, rollout_from_tensordict
+        n_dyn = cfg.algo.feature_extractor.dyn_obs_num
+        wm = WMTrainer(
+            cfg.wm, state_dim=8 + n_dyn * 10, action_dim=3, action_limit=cfg.algo.actor.action_limit,
+            device=cfg.device,
+            policy_params=list(policy.feature_extractor.parameters()) + list(policy.actor.parameters()),
+        )
+        imagination = policy.imagination_interface(env.lidar_resolution)
+
     # Episode Stats Collector
     episode_stats_keys = [
         k for k in transformed_env.observation_spec.keys(True, True) 
@@ -89,8 +101,15 @@ def main(cfg):
         info = {"env_frames": collector._frames, "rollout_fps": collector._fps}
 
         # Train Policy
-        train_loss_stats = policy.train(data)
-        info.update(train_loss_stats) # log training loss info
+        if wm is None or cfg.wm.use_ppo:
+            train_loss_stats = policy.train(data)
+            info.update(train_loss_stats) # log training loss info
+
+        if wm is not None:
+            wm.add(rollout_from_tensordict(data, cfg.algo.actor.action_limit))
+            info.update(wm.fit_world_model())
+            if i >= cfg.wm.policy_start_iter:
+                info.update(wm.improve_policy(imagination))
 
         # Calculate and log training episode stats
         episode_stats.add(data)
