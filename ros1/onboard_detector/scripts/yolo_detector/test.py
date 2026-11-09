@@ -7,7 +7,7 @@ from module.detector import Detector
 
 if __name__ == '__main__':
     device = "cpu"
-    weight = "weights/weight_AP05:0.253207_280-epoch.pth"
+    weight = "weights/weight_AP05-0.253207_280-epoch.pth"
     class_names = "config/coco.names"
     thresh = 0.65
     img = "test_data/0.jpg"
